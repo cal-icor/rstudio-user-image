@@ -12,8 +12,7 @@ install_packages_with_versions <- function(packages) {
   if (length(to_install) > 0) {
     install.packages(to_install, available = available,
                      versions = packages[to_install],
-                     dependencies = TRUE,
-                     lib = Sys.getenv("R_LIBS_USER"))
+                     dependencies = TRUE)
   } else {
     cat("All packages are already installed.\n")
   }
@@ -25,7 +24,7 @@ required_packages <- c("renv", "remotes", "devtools")
 # Check and install required packages
 new_packages <- required_packages[!sapply(required_packages, requireNamespace, quietly = TRUE)]
 if (length(new_packages) > 0) {
-  install.packages(new_packages, lib = Sys.getenv("R_LIBS_USER"))
+  install.packages(new_packages)
 }
 
 packages = list(
@@ -100,7 +99,5 @@ packages = list(
 install_packages_with_versions(packages)
 
 # install GitHub packages
-remotes::install_github("hrbrmstr/waffle", lib = "/srv/r") #Sys.getenv("R_LIBS_USER")) # https://github.com/cal-icor/cal-icor-hubs/issues/294
-remotes::install_github("speegled/fosdata", lib = "/srv/r") # https://github.com/cal-icor/base-user-image/issues/117
-
-.libPaths( c( "/srv/r" , .libPaths() ) )
+remotes::install_github("hrbrmstr/waffle") # https://github.com/cal-icor/cal-icor-hubs/issues/294
+remotes::install_github("speegled/fosdata") # https://github.com/cal-icor/base-user-image/issues/117
