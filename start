@@ -1,8 +1,8 @@
 #!/bin/bash
 
-if [ ! -f .Renviron ]; then
-  echo -e "CONDA_DIR=${CONDA_DIR}" >> .Renviron
-fi
+# if [ ! -f .Renviron ]; then
+#   echo -e "CONDA_DIR=${CONDA_DIR}\nR_LIBS_USER=/srv/r" >> .Renviron
+# fi
 
 # See https://jira-secure.berkeley.edu/browse/DH-305
 export PLAYWRIGHT_BROWSERS_PATH=${CONDA_DIR}
