@@ -27,9 +27,6 @@ net-tools
 htop
 tree
 
-# for timing builds
-time
-
 # for jupyter-tree-download, #3979
 zip
 
@@ -67,6 +64,9 @@ sudo
 libapparmor1
 lsb-release
 libclang-dev
+
+# R package postgresql
+libpq-dev
 
 # R package qpdf
 libpoppler-cpp-dev

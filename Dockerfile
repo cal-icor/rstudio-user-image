@@ -1,28 +1,49 @@
-FROM rocker/rstudio:4.5.1
-# https://github.com/rocker-org/rocker-versioned2/wiki/geospatial_871e1512223f
+FROM buildpack-deps:noble-scm AS base
 
+# Set up common env variables
+ENV TZ=America/Los_Angeles
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+ENV LC_ALL=en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive
 ENV NB_USER=rstudio
 ENV NB_UID=1000
+ENV SHELL=/bin/bash
+
+# These are used by the python, R, and final stages
+ENV REPO_DIR=/srv/repo
 ENV CONDA_DIR=/srv/conda
 ENV R_LIBS_USER=/srv/r
+
+# capture default path so we can set the path succinctly later
 ENV DEFAULT_PATH=${PATH}
 
-# Set ENV for all programs...
-ENV PATH=${CONDA_DIR}/bin:$PATH
+# needed for webpdf notebook exports in the jovyan's environment
+ENV PLAYWRIGHT_BROWSERS_PATH=${CONDA_DIR}
 
-ENV TZ=ENV TZ=America/Los_Angeles
+RUN apt-get -qq update --yes && \
+    apt-get -qq install --yes locales && \
+    echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && \
+    locale-gen
 
-# And set ENV for R! It doesn't read from the environment...
-RUN echo "TZ=${TZ}" >> /usr/local/lib/R/etc/Renviron.site
-RUN echo "PATH=${PATH}" >> /usr/local/lib/R/etc/Renviron.site
+RUN echo "Deleting user/group ubuntu (UID/GID 1000)..." && \
+    (userdel -f ubuntu || true) && \
+    (groupdel ubuntu || true)  && \
+    echo "Creating ${NB_USER} user with UID/GID 1000..." && \
+    adduser --disabled-password --gecos "Default Jupyter user" --uid ${NB_UID} ${NB_USER} && \
+    # Set home directory of jovyan user
+    usermod --home /home/${NB_USER} --move-home ${NB_USER} && \
+    # Make sure that /srv is owned by non-root user, so we can install things there
+    chown -R ${NB_USER}:${NB_USER} /srv
 
-# Add PATH to /etc/profile so it gets picked up by the terminal
-RUN echo "PATH=${PATH}" >> /etc/profile
-RUN echo "export PATH" >> /etc/profile
+# Do not exclude manpages from being installed.
+RUN sed -i '/usr.share.man/s/^/#/' /etc/dpkg/dpkg.cfg.d/excludes
 
-ENV HOME=/home/${NB_USER}
-
-WORKDIR ${HOME}
+# Reinstall coreutils so that basic man pages are installed. Due to dpkg's
+# exclusion, they were not originally installed.
+RUN apt --reinstall install coreutils
 
 # Install all apt packages
 COPY apt.txt /tmp/apt.txt
@@ -33,10 +54,57 @@ RUN apt-get -qq update --yes && \
     apt-get -qq clean && \
     rm -rf /var/lib/apt/lists/*
 
-ENV SHINY_SERVER_URL=https://download3.rstudio.org/ubuntu-20.04/x86_64/shiny-server-1.5.23.1030-amd64.deb
+# From docker-ce-packaging
+# Remove diverted man binary to prevent man-pages being replaced with "minimized" message. See docker/for-linux#639
+RUN if  [ "$(dpkg-divert --truename /usr/bin/man)" = "/usr/bin/man.REAL" ]; then \
+        rm -f /usr/bin/man; \
+        dpkg-divert --quiet --remove --rename /usr/bin/man; \
+    fi
+
+RUN mandb -c
+
+# These apt packages must be installed into the base stage since they are in
+# system paths rather than /srv.
+#
+# Pre-built R packages from Posit Package Manager are built against system libs
+# in jammy.
+#
+# After updating R_VERSION and rstudio-server, update Rprofile.site too.
+ENV R_VERSION=4.5.1-1.2404.0
+ENV LITTLER_VERSION=0.3.21-2.2404.0
+RUN apt-key adv --keyserver keyserver.ubuntu.com --recv-keys E298A3A825C0D65DFD57CBB651716619E084DAB9
+RUN echo "deb https://cloud.r-project.org/bin/linux/ubuntu noble-cran40/" > /etc/apt/sources.list.d/cran.list
+RUN curl --silent --location --fail https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc > /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc
+RUN apt-get update --yes > /dev/null && \
+    apt-get install --yes -qq r-base-core=${R_VERSION} r-base-dev=${R_VERSION} littler=${LITTLER_VERSION} r-cran-littler=${LITTLER_VERSION} > /dev/null
+
+# RStudio Server and Quarto
+ENV RSTUDIO_URL=https://download2.rstudio.org/server/jammy/amd64/rstudio-server-2025.09.1-401-amd64.deb
+RUN curl --silent --location --fail ${RSTUDIO_URL} > /tmp/rstudio.deb && \
+    apt install --no-install-recommends --yes /tmp/rstudio.deb && \
+    rm /tmp/rstudio.deb
+
+# For command-line access to quarto, which is installed by rstudio.
+RUN ln -s /usr/lib/rstudio-server/bin/quarto/bin/quarto /usr/local/bin/quarto
+
+# Shiny Server
+ENV SHINY_SERVER_URL=https://download3.rstudio.org/ubuntu-18.04/x86_64/shiny-server-1.5.22.1017-amd64.deb
 RUN curl --silent --location --fail ${SHINY_SERVER_URL} > /tmp/shiny-server.deb && \
     apt install --no-install-recommends --yes /tmp/shiny-server.deb && \
     rm /tmp/shiny-server.deb
+
+# R_LIBS_USER is set by default in /etc/R/Renviron, which RStudio loads.
+# We uncomment the default, and set what we wanna - so it picks up
+# the packages we install. Without this, RStudio doesn't see the packages
+# that R does.
+# Stolen from https://github.com/jupyterhub/repo2docker/blob/6a07a48b2df48168685bb0f993d2a12bd86e23bf/repo2docker/buildpacks/r.py
+# To try fight https://community.rstudio.com/t/timedatectl-had-status-1/72060,
+# which shows up sometimes when trying to install packages that want the TZ
+# timedatectl expects systemd running, which isn't true in our containers
+RUN echo "TZ=${TZ}" >> /etc/R/Renviron && \
+    sed -i -e '/^R_LIBS_USER=/s/^/#/' /etc/R/Renviron && \
+    echo "R_LIBS_USER=${R_LIBS_USER}" >> /etc/R/Renviron && \
+    echo "CONDA_DIR=${CONDA_DIR}" >> /etc/R/Renviron
 
 # Install our custom Rprofile.site file
 COPY Rprofile.site /usr/lib/R/etc/Rprofile.site
@@ -46,48 +114,48 @@ RUN mkdir /etc/R/Rprofile.site.d
 COPY rsession.conf /etc/rstudio/rsession.conf
 # set up basic rstudio user config
 COPY rstudio-prefs.json /etc/rstudio/rstudio-prefs.json
+# Use simpler locking strategy
+COPY file-locks /etc/rstudio/file-locks
 
-RUN install -d -o ${NB_USER} -g ${NB_USER} ${CONDA_DIR}
 
-# Install conda environment as our user
-USER ${NB_USER}
-COPY --chown=1000:1000 install-miniforge.bash /tmp/install-miniforge.bash
-RUN /tmp/install-miniforge.bash
-RUN rm -f /tmp/install-miniforge.bash
-
-USER ${NB_USER}
-COPY --chown=1000:1000 environment.yml /tmp/environment.yml
-ENV PATH=${CONDA_DIR}/bin:$PATH
-RUN mamba env update -q -p ${CONDA_DIR} -f /tmp/environment.yml
-RUN mamba clean -afy
-RUN rm -f /tmp/environment.yml
+# =============================================================================
+# This stage exists to build /srv/r.
+FROM base AS srv-r
 
 USER root
-RUN rm -rf ${HOME}/.cache
-RUN mkdir -p ${R_LIBS_USER}
 # Create user owned R libs dir
 # This lets users temporarily install packages
 RUN install -d -o ${NB_USER} -g ${NB_USER} ${R_LIBS_USER}
 
-# Prepare VS Code extensions
-USER root
-ENV VSCODE_EXTENSIONS=${CONDA_DIR}/share/code-server/extensions
-RUN install -d -o ${NB_USER} -g ${NB_USER} ${VSCODE_EXTENSIONS} && \
-    chown ${NB_USER}:${NB_USER} ${CONDA_DIR}/share/code-server
-
 # Install R libraries as our user
 USER ${NB_USER}
-COPY --chown=1000:1000 install.R /tmp/
-RUN Rscript /tmp/install.R
-RUN rm -f /tmp/install.R
 
-# Install IRKernel kernel
-RUN R --quiet -e "IRkernel::installspec(prefix='${CONDA_DIR}')"
+# Install R packages
+COPY install.R /tmp/
+RUN /tmp/install.R
 
-# Configure locking behavior
-COPY file-locks /etc/rstudio/file-locks
+# =============================================================================
+# This stage exists to build /srv/conda.
+FROM base AS srv-conda
 
+# USER root
+# Create user owned conda dir
+# This lets users temporarily install packages
+RUN install -d -o ${NB_USER} -g ${NB_USER} ${CONDA_DIR}
+
+# Install conda environment as our user
 USER ${NB_USER}
+
+# Install conda
+COPY --chown=${NB_USER}:${NB_USER} install-miniforge.bash /tmp/install-miniforge.bash
+RUN /tmp/install-miniforge.bash
+
+# Install Conda packages
+ENV PATH=${CONDA_DIR}/bin:$PATH
+COPY environment.yml /tmp/environment.yml
+RUN mamba env update -q -p ${CONDA_DIR} -f /tmp/environment.yml
+RUN mamba clean -afy
+
 # installing chromium browser to enable webpdf conversion using nbconvert
 ENV PLAYWRIGHT_BROWSERS_PATH=${CONDA_DIR}
 RUN playwright install chromium
@@ -106,19 +174,43 @@ RUN mkdir -p ${VSCODE_EXTENSIONS}
 
 # This is not reproducible, and it can be difficult to version these.
 RUN for x in \
+  ms-toolsai.jupyter \
+  ms-python.python \
   quarto.quarto \
   ms-vscode.live-server \
   posit.shiny \
   reditorsupport.r \
   ; do code-server --extensions-dir ${VSCODE_EXTENSIONS} --install-extension $x; done
 
-ENV PATH=${CONDA_DIR}/bin:${R_LIBS_USER}/bin:${DEFAULT_PATH}:/usr/lib/rstudio-server/bin
-COPY --chown=${NB_USER}:${NB_USER} .Renviron /home/${NB_USER}
+# =============================================================================
+# This stage consumes base and import /srv/r and /srv/conda.
+FROM base AS final
 
+USER root
+COPY --chown=${NB_USER}:${NB_USER} --from=srv-r /srv/r /srv/r
+COPY --chown=${NB_USER}:${NB_USER} --from=srv-conda /srv/conda /srv/conda
+COPY --chown=${NB_USER}:${NB_USER} activate-conda.sh /etc/profile.d/activate-conda.sh
+
+USER ${NB_USER}
+ENV PATH=${CONDA_DIR}/bin:${R_LIBS_USER}/bin:${DEFAULT_PATH}:/usr/lib/rstudio-server/bin
+
+# Install IR kernelspec. Requires python and R.
+RUN R -e "IRkernel::installspec(user = FALSE, prefix='${CONDA_DIR}')"
+
+# clear out /tmp
+USER root
+RUN rm -rf /tmp/*
+# Remove the pip cache created as part of installing mambaforge
+RUN rm -rf /root/.cache
+
+# copy the repo to /srv/repo
+COPY . ${REPO_DIR}/
+
+# RUN chown -R ${NB_USER}:${NB_USER} /srv/shiny-server
+
+USER ${NB_USER}
 WORKDIR /home/${NB_USER}
 
-# Set SHELL so Jupyter launches /bin/bash, not /bin/sh
-# /bin/sh doesn't have a lot of interactive features (like tab complete or functional arrow keys)
-# that people have come to expect.
-ENV SHELL=/bin/bash
 EXPOSE 8888
+
+ENTRYPOINT ["tini", "--"]
